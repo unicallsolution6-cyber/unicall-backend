@@ -31,7 +31,8 @@ app.use(
       'http://localhost:3000',
       'http://localhost:3001',
       'http://13.51.165.117',
-    ], // Next.js default ports
+      process.env.CLIENT_URL,
+    ].filter(Boolean),
     credentials: true,
   })
 );
@@ -54,7 +55,8 @@ const io = new Server(server, {
       'http://localhost:3000',
       'http://localhost:3001',
       'http://13.51.165.117',
-    ],
+      process.env.CLIENT_URL,
+    ].filter(Boolean),
     credentials: true,
   },
 });
@@ -122,9 +124,12 @@ app.use('*', (req, res) => {
   });
 });
 
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// Only listen when not running on Vercel
+if (process.env.VERCEL !== '1') {
+  const PORT = process.env.PORT || 5000;
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
 
-module.exports = { app, events };
+module.exports = app;
