@@ -79,7 +79,7 @@ router.get(
   [authenticateToken, requireAdmin],
   async (req, res) => {
     try {
-      const file = await UserFile.findById(req.user._id);
+      const file = await UserFile.findById(req.params.id);
 
       if (!file) {
         return res.status(404).json({ error: 'File not found' });
@@ -102,7 +102,7 @@ router.get(
 // Delete a file by ID
 router.delete('/:id', [authenticateToken, requireAdmin], async (req, res) => {
   try {
-    const file = await UserFile.findById(req.user._id);
+    const file = await UserFile.findById(req.params.id);
 
     if (!file) {
       return res.status(404).json({ error: 'File not found' });
