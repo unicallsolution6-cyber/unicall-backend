@@ -44,7 +44,7 @@ app.use(express.urlencoded({ extended: true }));
 
 // Ensure upload directories exist (created on a fresh deploy)
 const fs = require('fs');
-['uploads', 'uploads/avatars'].forEach((dir) => {
+['uploads', 'uploads/avatars', 'uploads/lead-forms', 'uploads/user-files'].forEach((dir) => {
   const fullPath = path.join(__dirname, dir);
   if (!fs.existsSync(fullPath)) {
     fs.mkdirSync(fullPath, { recursive: true });
