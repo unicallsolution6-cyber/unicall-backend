@@ -12,7 +12,7 @@ const router = express.Router();
 // Configure multer for profile image uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadDir = 'uploads/avatars/';
+    const uploadDir = path.join(__dirname, '..', 'uploads', 'avatars');
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
@@ -198,6 +198,7 @@ router.post(
   [
     authenticateToken,
     requireAdmin,
+    upload.single('avatar'),
     body('name')
       .trim()
       .isLength({ min: 2 })
@@ -225,7 +226,7 @@ router.post(
         });
       }
 
-      const { name, email, password, role = 'user' } = req.body;
+      const { name, email, password, role = 'user', isActive } = req.body;
 
       // Check if user already exists
       const existingUser = await User.findOne({ email });
@@ -242,7 +243,18 @@ router.post(
         email,
         password,
         role,
+        ...(isActive !== undefined && {
+          isActive: isActive === true || isActive === 'true',
+        }),
       });
+
+      // Attach uploaded avatar (saved to /uploads/avatars by multer)
+      if (req.file) {
+        user.avatar = `/uploads/avatars/${req.file.filename}`;
+      } else if (req.body.avatar) {
+        // Allow passing an avatar URL/path directly
+        user.avatar = req.body.avatar;
+      }
 
       await user.save();
 
@@ -334,7 +346,7 @@ router.put(
 
         // Delete old avatar if it exists and isn't the default
         if (user.avatar && user.avatar !== '/user.png') {
-          const oldAvatarPath = path.join(__dirname, '../..', user.avatar);
+          const oldAvatarPath = path.join(__dirname, '..', user.avatar);
           if (fs.existsSync(oldAvatarPath)) {
             fs.unlinkSync(oldAvatarPath);
           }
@@ -342,7 +354,7 @@ router.put(
       } else if (removeImage === 'true') {
         // Remove current avatar
         if (user.avatar && user.avatar !== '/user.png') {
-          const oldAvatarPath = path.join(__dirname, '../..', user.avatar);
+          const oldAvatarPath = path.join(__dirname, '..', user.avatar);
           if (fs.existsSync(oldAvatarPath)) {
             fs.unlinkSync(oldAvatarPath);
           }

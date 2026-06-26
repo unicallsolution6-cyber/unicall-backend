@@ -11,7 +11,7 @@ const router = express.Router();
 // Configure multer for profile image uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadDir = 'uploads/avatars/';
+    const uploadDir = path.join(__dirname, '..', 'uploads', 'avatars');
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
@@ -276,7 +276,7 @@ router.put('/profile', [
       
       // Delete old avatar if it exists and isn't the default
       if (req.user.avatar && req.user.avatar !== '/user.png') {
-        const oldAvatarPath = path.join(__dirname, '../..', req.user.avatar);
+        const oldAvatarPath = path.join(__dirname, '..', req.user.avatar);
         if (fs.existsSync(oldAvatarPath)) {
           fs.unlinkSync(oldAvatarPath);
         }
@@ -284,7 +284,7 @@ router.put('/profile', [
     } else if (removeImage === 'true') {
       // Remove current avatar
       if (req.user.avatar && req.user.avatar !== '/user.png') {
-        const oldAvatarPath = path.join(__dirname, '../..', req.user.avatar);
+        const oldAvatarPath = path.join(__dirname, '..', req.user.avatar);
         if (fs.existsSync(oldAvatarPath)) {
           fs.unlinkSync(oldAvatarPath);
         }
