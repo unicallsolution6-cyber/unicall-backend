@@ -29,29 +29,32 @@ const upload = multer({ storage });
 
 // --- Routes ---
 
-// Upload a file for a user
+// Upload one or more files for a user
 router.post(
   '/upload/:userId',
-  [authenticateToken, requireAdmin, upload.single('file')],
+  [authenticateToken, requireAdmin, upload.array('files')],
   async (req, res) => {
     try {
-      if (!req.file) {
-        return res.status(400).json({ error: 'No file uploaded' });
+      // Support both the new `files` array field and a single `file` fallback
+      const uploadedFiles = req.files && req.files.length ? req.files : [];
+
+      if (!uploadedFiles.length) {
+        return res.status(400).json({ error: 'No files uploaded' });
       }
 
-      const newFile = new UserFile({
+      const docs = uploadedFiles.map((file) => ({
         userId: req.user._id,
-        fileName: req.file.originalname,
-        filePath: `/uploads/user-files/${req.file.filename}`,
-        type: req.file.mimetype.startsWith('image/') ? 'image' : 'document',
-      });
+        fileName: file.originalname,
+        filePath: `/uploads/user-files/${file.filename}`,
+        type: file.mimetype.startsWith('image/') ? 'image' : 'document',
+      }));
 
-      await newFile.save();
+      const savedFiles = await UserFile.insertMany(docs);
 
       res.status(201).json({
         success: true,
-        message: 'File uploaded successfully',
-        data: newFile,
+        message: `${savedFiles.length} file(s) uploaded successfully`,
+        data: savedFiles,
       });
     } catch (error) {
       console.error('UserFile upload error:', error);
