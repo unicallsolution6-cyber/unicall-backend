@@ -35,6 +35,22 @@ const userSchema = new mongoose.Schema({
   lastLogoutAll: {
     type: Date,
     default: null
+  },
+  // OTP (two-step login) fields — kept out of query results by default
+  otpHash: {
+    type: String,
+    default: null,
+    select: false
+  },
+  otpExpiresAt: {
+    type: Date,
+    default: null,
+    select: false
+  },
+  otpAttempts: {
+    type: Number,
+    default: 0,
+    select: false
   }
 }, {
   timestamps: true

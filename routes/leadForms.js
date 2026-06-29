@@ -167,13 +167,15 @@ router.get('/', authenticateToken, async (req, res) => {
       }
     }
 
-    const leadForms = await LeadForm.find(query)
-      .populate('assignee', 'name email')
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .skip(skip);
-
-    const total = await LeadForm.countDocuments(query);
+    const [leadForms, total] = await Promise.all([
+      LeadForm.find(query)
+        .populate('assignee', 'name email')
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .skip(skip)
+        .lean(),
+      LeadForm.countDocuments(query),
+    ]);
 
     res.json({
       success: true,
@@ -295,13 +297,15 @@ router.get('/unstructured-lead-forms', authenticateToken, async (req, res) => {
       }
     }
 
-    const unstructuredForms = await UnstructuredLeadForm.find(query)
-      .populate('assignee', 'name email')
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .skip(skip);
-
-    const total = await UnstructuredLeadForm.countDocuments(query);
+    const [unstructuredForms, total] = await Promise.all([
+      UnstructuredLeadForm.find(query)
+        .populate('assignee', 'name email')
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .skip(skip)
+        .lean(),
+      UnstructuredLeadForm.countDocuments(query),
+    ]);
 
     res.json({
       success: true,
@@ -360,10 +364,14 @@ router.get('/:id', authenticateToken, async (req, res) => {
 // @access  Private (Admin)
 router.post(
   '/bulk-upload',
-  [authenticateToken, requireAdmin, upload.single('file')],
+  [authenticateToken, requireAdmin, upload.array('files')],
   async (req, res) => {
     try {
-      if (!req.file) {
+      // Support the new `files` array, with a fallback to a single `file`
+      const uploadedFiles =
+        req.files && req.files.length ? req.files : req.file ? [req.file] : [];
+
+      if (!uploadedFiles.length) {
         return res.status(400).json({
           success: false,
           message: 'No file uploaded',
@@ -371,107 +379,119 @@ router.post(
       }
 
       // only allow text files (for now)
-      if (
-        req.file.mimetype !== 'text/plain' &&
-        path.extname(req.file.originalname) !== '.txt'
-      ) {
+      const invalidFile = uploadedFiles.find(
+        (file) =>
+          file.mimetype !== 'text/plain' &&
+          path.extname(file.originalname) !== '.txt'
+      );
+      if (invalidFile) {
+        // Clean up everything we just received before rejecting
+        uploadedFiles.forEach((file) => {
+          if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+        });
         return res.status(400).json({
           success: false,
           message: 'Only .txt files are allowed',
         });
       }
 
-      const filePath = req.file.path;
-      const fileContent = fs.readFileSync(filePath, 'utf8');
-
-      const lines = fileContent
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line !== '');
-
       const results = {
-        total: lines.length,
+        files: uploadedFiles.length,
+        total: 0,
         structured: 0,
         unstructured: 0,
         failed: 0,
         errors: [],
       };
 
-      for (const [index, line] of lines.entries()) {
-        try {
-          const parts = line.split('|').map((part) => part.trim());
+      for (const file of uploadedFiles) {
+        const filePath = file.path;
+        const fileContent = fs.readFileSync(filePath, 'utf8');
 
-          // check format (must have 16 fields)
-          if (parts.length < 16) {
-            const unstructuredLeadForm = new UnstructuredLeadForm({
-              type: 'row',
-              rawData: { line },
-              assignee: null,
-              dialingStatus: 'not_dialed',
+        const lines = fileContent
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line !== '');
+
+        results.total += lines.length;
+
+        for (const [index, line] of lines.entries()) {
+          try {
+            const parts = line.split('|').map((part) => part.trim());
+
+            // check format (must have 16 fields)
+            if (parts.length < 16) {
+              const unstructuredLeadForm = new UnstructuredLeadForm({
+                type: 'row',
+                rawData: { line },
+                assignee: null,
+                dialingStatus: 'not_dialed',
+              });
+              await unstructuredLeadForm.save();
+              results.unstructured++;
+              continue;
+            }
+
+            // basic field checks (example: 16-digit card number, 2-digit month/year, 3-digit cvv)
+            const cardNumberPattern = /^\d{16}$/;
+            const monthPattern = /^\d{2}$/;
+            const yearPattern = /^\d{2}$/;
+            const cvvPattern = /^\d{3}$/;
+
+            if (
+              !cardNumberPattern.test(parts[0]) ||
+              !monthPattern.test(parts[1]) ||
+              !yearPattern.test(parts[2]) ||
+              !cvvPattern.test(parts[3])
+            ) {
+              const unstructuredLeadForm = new UnstructuredLeadForm({
+                type: 'row',
+                rawData: { line },
+                assignee: null,
+                dialingStatus: 'not_dialed',
+              });
+              await unstructuredLeadForm.save();
+              results.unstructured++;
+              continue;
+            }
+
+            // if all checks pass → save as structured lead
+            const leadData = {
+              cardNumber: parts[0],
+              expirationMonth: parts[1],
+              expirationYear: parts[2],
+              cvv: parts[3],
+              fullName: parts[4],
+              streetAddress: parts[5],
+              city: parts[6],
+              state: parts[7],
+              zipCode: parts[8],
+              phone: parts[9],
+              email: parts[10],
+              bank: parts[11],
+              cardType: parts[12],
+              cardClass: parts[13],
+              cardCategory: parts[14],
+              country: parts[15],
+              countryFullName: parts[16] || 'UNITED STATES',
+              createdBy: req.user._id,
+            };
+
+            const leadForm = new LeadForm(leadData);
+            await leadForm.save();
+            results.structured++;
+          } catch (error) {
+            results.failed++;
+            results.errors.push({
+              file: file.originalname,
+              line: index + 1,
+              error: error.message,
             });
-            await unstructuredLeadForm.save();
-            results.unstructured++;
-            continue;
           }
-
-          // basic field checks (example: 16-digit card number, 2-digit month/year, 3-digit cvv)
-          const cardNumberPattern = /^\d{16}$/;
-          const monthPattern = /^\d{2}$/;
-          const yearPattern = /^\d{2}$/;
-          const cvvPattern = /^\d{3}$/;
-
-          if (
-            !cardNumberPattern.test(parts[0]) ||
-            !monthPattern.test(parts[1]) ||
-            !yearPattern.test(parts[2]) ||
-            !cvvPattern.test(parts[3])
-          ) {
-            const unstructuredLeadForm = new UnstructuredLeadForm({
-              type: 'row',
-              rawData: { line },
-              assignee: null,
-              dialingStatus: 'not_dialed',
-            });
-            await unstructuredLeadForm.save();
-            results.unstructured++;
-            continue;
-          }
-
-          // if all checks pass → save as structured lead
-          const leadData = {
-            cardNumber: parts[0],
-            expirationMonth: parts[1],
-            expirationYear: parts[2],
-            cvv: parts[3],
-            fullName: parts[4],
-            streetAddress: parts[5],
-            city: parts[6],
-            state: parts[7],
-            zipCode: parts[8],
-            phone: parts[9],
-            email: parts[10],
-            bank: parts[11],
-            cardType: parts[12],
-            cardClass: parts[13],
-            cardCategory: parts[14],
-            country: parts[15],
-            countryFullName: parts[16] || 'UNITED STATES',
-            createdBy: req.user._id,
-          };
-
-          const leadForm = new LeadForm(leadData);
-          await leadForm.save();
-          results.structured++;
-        } catch (error) {
-          results.failed++;
-          results.errors.push({
-            line: index + 1,
-            error: error.message,
-          });
         }
-      }
 
-      fs.unlinkSync(filePath);
+        fs.unlinkSync(filePath);
+      }
 
       res.status(200).json({
         success: true,
@@ -493,10 +513,14 @@ router.post(
 // @access  Private (Admin)
 router.post(
   '/unstructured-lead-forms/upload-file',
-  [authenticateToken, requireAdmin, upload.single('file')],
+  [authenticateToken, requireAdmin, upload.array('files')],
   async (req, res) => {
     try {
-      if (!req.file) {
+      // Support the new `files` array, with a fallback to a single `file`
+      const uploadedFiles =
+        req.files && req.files.length ? req.files : req.file ? [req.file] : [];
+
+      if (!uploadedFiles.length) {
         return res.status(400).json({
           success: false,
           message: 'No file uploaded',
@@ -504,24 +528,22 @@ router.post(
       }
 
       // For now store locally. If you’re using cloud (S3, Cloudinary),
-      // replace req.file.path with the returned cloud URL.
-      const fileUrl = `/uploads/lead-forms/${req.file.filename}`;
-
-      const unstructuredLeadForm = new UnstructuredLeadForm({
+      // replace file.path with the returned cloud URL.
+      const docs = uploadedFiles.map((file) => ({
         type: 'file',
         rawData: null,
-        link: fileUrl,
-        fileName: req.file.originalname,
+        link: `/uploads/lead-forms/${file.filename}`,
+        fileName: file.originalname,
         assignee: null,
         dialingStatus: 'not_dialed',
-      });
+      }));
 
-      await unstructuredLeadForm.save();
+      const savedFiles = await UnstructuredLeadForm.insertMany(docs);
 
       res.status(201).json({
         success: true,
-        message: 'Unstructured file uploaded successfully',
-        data: unstructuredLeadForm,
+        message: `${savedFiles.length} unstructured file(s) uploaded successfully`,
+        data: savedFiles,
       });
     } catch (error) {
       console.error('Unstructured file upload error:', error);

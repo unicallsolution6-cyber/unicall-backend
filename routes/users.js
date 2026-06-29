@@ -124,22 +124,15 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
       }
     }
 
-    console.log(
-      'Built MongoDB query for users:',
-      JSON.stringify(query, null, 2)
-    );
-
-    const users = await User.find(query)
-      .select('-password')
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .skip(skip);
-
-    const total = await User.countDocuments(query);
-
-    console.log(
-      `Found ${users.length} users out of ${total} total matching filters`
-    );
+    const [users, total] = await Promise.all([
+      User.find(query)
+        .select('-password')
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .skip(skip)
+        .lean(),
+      User.countDocuments(query),
+    ]);
 
     res.json({
       success: true,

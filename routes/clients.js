@@ -15,8 +15,6 @@ router.get('/', authenticateToken, async (req, res) => {
     const skip = (page - 1) * limit;
     const { bank, status, search, createdBy, dateFilter } = req.query;
 
-    console.log('Clients query parameters:', req.query);
-
     // Build query based on user role
     let query = {};
     
@@ -77,17 +75,15 @@ router.get('/', authenticateToken, async (req, res) => {
       }
     }
 
-    console.log('Built MongoDB query:', JSON.stringify(query, null, 2));
-
-    const clients = await Client.find(query)
-      .populate('createdBy', 'name email')
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .skip(skip);
-
-    const total = await Client.countDocuments(query);
-
-    console.log(`Found ${clients.length} clients out of ${total} total`);
+    const [clients, total] = await Promise.all([
+      Client.find(query)
+        .populate('createdBy', 'name email')
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .skip(skip)
+        .lean(),
+      Client.countDocuments(query),
+    ]);
 
     res.json({
       success: true,
@@ -119,7 +115,6 @@ router.get('/', authenticateToken, async (req, res) => {
 router.get('/dashboard-metrics', authenticateToken, async (req, res) => {
   try {
     const { dateFilter } = req.query;
-    console.log('Dashboard metrics query parameters:', req.query);
 
     // Build base query based on user role
     let baseQuery = {};
@@ -162,8 +157,6 @@ router.get('/dashboard-metrics', authenticateToken, async (req, res) => {
       }
     }
 
-    console.log('Built base query for metrics:', JSON.stringify(baseQuery, null, 2));
-
     // Get total counts for each status
     const [totalClients, paidWire, pending, followup, deactivated] = await Promise.all([
       Client.countDocuments(baseQuery),
@@ -188,8 +181,6 @@ router.get('/dashboard-metrics', authenticateToken, async (req, res) => {
       followupChange: "+0.00%",
       deactivatedChange: "+0.00%"
     };
-
-    console.log('Dashboard metrics calculated:', metrics);
 
     res.json({
       success: true,

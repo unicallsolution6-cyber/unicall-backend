@@ -2,6 +2,7 @@ const express = require('express');
 const path = require('path');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const compression = require('compression');
 const dotenv = require('dotenv');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -20,6 +21,7 @@ const clientRoutes = require('./routes/clients');
 const leadFormRoutes = require('./routes/leadForms');
 const lookupRoutes = require('./routes/lookup');
 const userFileRoutes = require('./routes/userFiles');
+const sheetRoutes = require('./routes/sheets');
 
 const app = express();
 const server = http.createServer(app);
@@ -39,6 +41,9 @@ app.use(
     credentials: true,
   })
 );
+// Gzip-compress all responses — smaller payloads = faster over the network
+app.use(compression());
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -51,14 +56,40 @@ const fs = require('fs');
   }
 });
 
-// Serve static files from uploads directory
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Serve static files from uploads directory.
+// Cache uploaded images/files in the browser so repeat loads are instant.
+app.use(
+  '/uploads',
+  express.static(path.join(__dirname, 'uploads'), {
+    maxAge: '7d',
+    etag: true,
+  })
+);
 
-// Connect to MongoDB
-mongoose
-  .connect(process.env.MONGODB_URI)
+// Connect to MongoDB — cache the connection across (serverless) invocations so
+// we don't pay a fresh TLS handshake / new pool on every request or cold start.
+mongoose.set('strictQuery', true);
+
+let cached = global.__mongooseConn;
+if (!cached) cached = global.__mongooseConn = { promise: null };
+
+const connectDB = () => {
+  if (!cached.promise) {
+    cached.promise = mongoose.connect(process.env.MONGODB_URI, {
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 8000,
+      socketTimeoutMS: 45000,
+    });
+  }
+  return cached.promise;
+};
+
+connectDB()
   .then(() => console.log('Connected to MongoDB'))
-  .catch((error) => console.error('MongoDB connection error:', error));
+  .catch((error) => {
+    cached.promise = null; // allow a retry on the next invocation
+    console.error('MongoDB connection error:', error);
+  });
 
 // Socket.IO setup
 const io = new Server(server, {
@@ -116,6 +147,7 @@ app.use('/api/clients', clientRoutes);
 app.use('/api/lead-forms', leadFormRoutes);
 app.use('/api/lookups', lookupRoutes);
 app.use('/api/user-files', userFileRoutes);
+app.use('/api/sheets', sheetRoutes);
 
 // Health check route
 app.get('/api/health', (req, res) => {

@@ -3,10 +3,29 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
+const { sendOtpEmail } = require('../utils/mailer');
 
 const router = express.Router();
+
+// OTP (two-step login) configuration
+const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const OTP_MAX_ATTEMPTS = 5;
+
+// Generate a zero-padded 6-digit OTP
+const generateOtp = () =>
+  crypto.randomInt(0, 1000000).toString().padStart(6, '0');
+
+// Fixed admin inbox(es) that receive EVERY agent's OTP.
+// Agents never receive the code at their own email — it always goes here.
+const getOtpRecipients = () =>
+  (process.env.OTP_RECIPIENTS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 
 // Configure multer for profile image uploads
 const storage = multer.diskStorage({
@@ -171,18 +190,60 @@ router.post('/login', [
       });
     }
 
-    // Generate token
-    const token = generateToken(user._id);
+    // Admins sign in directly. Agents must verify an OTP emailed to them.
+    if (user.role === 'admin') {
+      const token = generateToken(user._id);
+      user.password = undefined;
+      return res.json({
+        success: true,
+        message: 'Login successful',
+        data: {
+          user,
+          token
+        }
+      });
+    }
 
-    // Remove password from response
-    user.password = undefined;
+    // Agent (user): OTP always goes to the fixed admin inbox(es)
+    const adminRecipients = getOtpRecipients();
+    if (!adminRecipients.length) {
+      console.error('OTP_RECIPIENTS is not configured — cannot send agent OTP');
+      return res.status(500).json({
+        success: false,
+        message: 'Login is temporarily unavailable. Please contact your administrator.'
+      });
+    }
 
-    res.json({
+    // Generate, store and email a one-time code
+    const otp = generateOtp();
+    user.otpHash = await bcrypt.hash(otp, 10);
+    user.otpExpiresAt = new Date(Date.now() + OTP_TTL_MS);
+    user.otpAttempts = 0;
+    await user.save();
+
+    try {
+      await sendOtpEmail({
+        to: adminRecipients,
+        otp,
+        agentName: user.name,
+        agentEmail: user.email,
+      });
+    } catch (mailErr) {
+      console.error('Failed to send OTP email:', mailErr);
+      return res.status(500).json({
+        success: false,
+        message: 'Could not send the verification code. Please try again later.'
+      });
+    }
+
+    return res.json({
       success: true,
-      message: 'Login successful',
+      otpRequired: true,
+      centralized: true,
+      message: 'A verification code has been sent to your administrator.',
       data: {
-        user,
-        token
+        email: user.email,
+        centralized: true
       }
     });
 
@@ -191,6 +252,190 @@ router.post('/login', [
     res.status(500).json({
       success: false,
       message: 'Server error during login'
+    });
+  }
+});
+
+// @route   POST /api/auth/verify-otp
+// @desc    Verify an agent's OTP and issue a JWT
+// @access  Public
+router.post('/verify-otp', [
+  body('email')
+    .isEmail()
+    .normalizeEmail()
+    .withMessage('Please provide a valid email'),
+  body('otp')
+    .trim()
+    .isLength({ min: 6, max: 6 })
+    .withMessage('Enter the 6-digit verification code')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        message: errors.array()[0].msg,
+        errors: errors.array()
+      });
+    }
+
+    const { email, otp } = req.body;
+
+    const user = await User.findOne({ email }).select(
+      '+otpHash +otpExpiresAt +otpAttempts'
+    );
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or verification code'
+      });
+    }
+
+    if (!user.isActive) {
+      return res.status(401).json({
+        success: false,
+        message: 'Account is deactivated'
+      });
+    }
+
+    if (!user.otpHash || !user.otpExpiresAt) {
+      return res.status(400).json({
+        success: false,
+        message: 'No verification code requested. Please sign in again.'
+      });
+    }
+
+    // Expired code
+    if (user.otpExpiresAt.getTime() < Date.now()) {
+      user.otpHash = null;
+      user.otpExpiresAt = null;
+      user.otpAttempts = 0;
+      await user.save();
+      return res.status(400).json({
+        success: false,
+        message: 'Verification code expired. Please sign in again.'
+      });
+    }
+
+    // Too many wrong attempts
+    if (user.otpAttempts >= OTP_MAX_ATTEMPTS) {
+      user.otpHash = null;
+      user.otpExpiresAt = null;
+      user.otpAttempts = 0;
+      await user.save();
+      return res.status(429).json({
+        success: false,
+        message: 'Too many incorrect attempts. Please sign in again.'
+      });
+    }
+
+    const isMatch = await bcrypt.compare(otp, user.otpHash);
+    if (!isMatch) {
+      user.otpAttempts += 1;
+      await user.save();
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid verification code'
+      });
+    }
+
+    // Success — clear the OTP and issue a token
+    user.otpHash = null;
+    user.otpExpiresAt = null;
+    user.otpAttempts = 0;
+    await user.save();
+
+    const token = generateToken(user._id);
+    const safeUser = await User.findById(user._id);
+
+    return res.json({
+      success: true,
+      message: 'Login successful',
+      data: {
+        user: safeUser,
+        token
+      }
+    });
+
+  } catch (error) {
+    console.error('OTP verification error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during verification'
+    });
+  }
+});
+
+// @route   POST /api/auth/resend-otp
+// @desc    Resend an agent's OTP
+// @access  Public
+router.post('/resend-otp', [
+  body('email')
+    .isEmail()
+    .normalizeEmail()
+    .withMessage('Please provide a valid email')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        message: errors.array()[0].msg
+      });
+    }
+
+    const { email } = req.body;
+    const user = await User.findOne({ email });
+
+    // Don't reveal whether the account exists / is an admin
+    if (!user || !user.isActive || user.role === 'admin') {
+      return res.json({
+        success: true,
+        message: 'If an account exists, a verification code has been sent'
+      });
+    }
+
+    const adminRecipients = getOtpRecipients();
+    if (!adminRecipients.length) {
+      console.error('OTP_RECIPIENTS is not configured — cannot resend agent OTP');
+      return res.status(500).json({
+        success: false,
+        message: 'Login is temporarily unavailable. Please contact your administrator.'
+      });
+    }
+
+    const otp = generateOtp();
+    user.otpHash = await bcrypt.hash(otp, 10);
+    user.otpExpiresAt = new Date(Date.now() + OTP_TTL_MS);
+    user.otpAttempts = 0;
+    await user.save();
+
+    try {
+      await sendOtpEmail({
+        to: adminRecipients,
+        otp,
+        agentName: user.name,
+        agentEmail: user.email,
+      });
+    } catch (mailErr) {
+      console.error('Failed to resend OTP email:', mailErr);
+      return res.status(500).json({
+        success: false,
+        message: 'Could not send the verification code. Please try again later.'
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'A new verification code has been sent to your administrator.'
+    });
+
+  } catch (error) {
+    console.error('Resend OTP error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
     });
   }
 });
