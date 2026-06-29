@@ -8,8 +8,9 @@ const http = require('http');
 const { Server } = require('socket.io');
 const EventEmitter = require('events');
 
-// Load environment variables
-dotenv.config();
+// Load environment variables from the backend folder's .env regardless of the
+// directory `node` was started from (prevents "env not loaded" surprises).
+dotenv.config({ path: path.join(__dirname, '.env') });
 
 // Create global event emitter
 const events = require('./events');
