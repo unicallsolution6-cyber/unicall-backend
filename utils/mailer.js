@@ -166,7 +166,9 @@ const sendOtpEmail = async ({ to, otp, agentName, agentEmail }) => {
     );
   }
 
-  const recipients = Array.isArray(to) ? to.join(', ') : to;
+  // Send each admin their OWN email (not one shared "To") so a single failure
+  // doesn't block the rest, and admins don't see each other's addresses.
+  const recipientList = Array.isArray(to) ? to.filter(Boolean) : [to];
   const requester = agentEmail ? { name: agentName, email: agentEmail } : null;
 
   const fromName = process.env.EMAIL_FROM_NAME || 'Unicall';
@@ -178,33 +180,49 @@ const sendOtpEmail = async ({ to, otp, agentName, agentEmail }) => {
     ? `Agent ${agentName || ''} (${agentEmail}) is signing in to Unicall.\nVerification code: ${otp}\nValid for 5 minutes. Share it with the agent to complete sign-in.`
     : `Hi ${agentName || 'there'},\n\nYour Unicall verification code is ${otp}. It is valid for 5 minutes.\n\nIf you didn't request this, you can ignore this email.`;
 
-  let lastErr;
-
-  // Try each sender once, starting at the current round-robin position.
-  for (let i = 0; i < pool.length; i++) {
-    const sender = pool[(rrIndex + i) % pool.length];
-    try {
-      const info = await getTransporterFor(sender).sendMail({
-        // From must be the authenticated Gmail account for deliverability
-        from: `${fromName} <${sender.user}>`,
-        to: recipients,
-        subject,
-        html,
-        text,
-      });
-
-      // Advance the cursor so the next OTP starts at the following sender
-      rrIndex = (rrIndex + i + 1) % pool.length;
-      return info;
-    } catch (err) {
-      lastErr = err;
-      console.error(`OTP send failed via ${sender.user}:`, err.message);
+  // Deliver to a single recipient, rotating through senders with failover.
+  const sendToOne = async (recipient) => {
+    let lastErr;
+    for (let i = 0; i < pool.length; i++) {
+      const sender = pool[(rrIndex + i) % pool.length];
+      try {
+        const info = await getTransporterFor(sender).sendMail({
+          // From must be the authenticated Gmail account for deliverability
+          from: `${fromName} <${sender.user}>`,
+          to: recipient,
+          subject,
+          html,
+          text,
+        });
+        rrIndex = (rrIndex + i + 1) % pool.length;
+        return { recipient, ok: true, info };
+      } catch (err) {
+        lastErr = err;
+        console.error(`OTP send to ${recipient} failed via ${sender.user}:`, err.message);
+      }
     }
+    rrIndex = (rrIndex + 1) % pool.length;
+    return { recipient, ok: false, error: lastErr };
+  };
+
+  const results = [];
+  for (const recipient of recipientList) {
+    results.push(await sendToOne(recipient));
   }
 
-  // Every sender failed — move the cursor on anyway and surface the error
-  rrIndex = (rrIndex + 1) % pool.length;
-  throw lastErr || new Error('Failed to send OTP email');
+  const delivered = results.filter((r) => r.ok);
+  console.log(
+    `OTP delivered to ${delivered.length}/${recipientList.length} recipient(s): ${delivered
+      .map((r) => r.recipient)
+      .join(', ')}`
+  );
+
+  // Only fail if NObody received it
+  if (!delivered.length) {
+    throw (results[0] && results[0].error) || new Error('Failed to send OTP email');
+  }
+
+  return results;
 };
 
 module.exports = { sendOtpEmail, getSenders };
